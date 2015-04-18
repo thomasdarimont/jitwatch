@@ -5,47 +5,54 @@
  */
 package org.adoptopenjdk.jitwatch.ui.sandbox;
 
-import static org.adoptopenjdk.jitwatch.core.JITWatchConstants.C_NEWLINE;
-import static org.adoptopenjdk.jitwatch.util.UserInterfaceUtil.FONT_MONOSPACE_FAMILY;
-import static org.adoptopenjdk.jitwatch.util.UserInterfaceUtil.FONT_MONOSPACE_SIZE;
-
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-import javafx.application.Platform;
 import javafx.beans.value.ChangeListener;
 import javafx.beans.value.ObservableValue;
-import javafx.event.EventHandler;
-import javafx.geometry.Orientation;
-import javafx.scene.control.ScrollBar;
-import javafx.scene.control.SplitPane;
-import javafx.scene.control.TextArea;
-import javafx.scene.input.KeyCode;
-import javafx.scene.input.KeyCodeCombination;
-import javafx.scene.input.KeyCombination;
-import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.VBox;
 import javafx.stage.FileChooser;
-
 import org.adoptopenjdk.jitwatch.loader.ResourceLoader;
 import org.adoptopenjdk.jitwatch.sandbox.Sandbox;
 import org.adoptopenjdk.jitwatch.ui.Dialogs;
 import org.adoptopenjdk.jitwatch.ui.Dialogs.Response;
-import org.adoptopenjdk.jitwatch.util.StringUtil;
+import org.fxmisc.richtext.CodeArea;
+import org.fxmisc.richtext.LineNumberFactory;
+import org.fxmisc.richtext.StyleSpans;
+import org.fxmisc.richtext.StyleSpansBuilder;
 
 public class EditorPane extends VBox
 {
-	private SplitPane spTextAreas;
 
-	private TextArea taSource;
-	private TextArea taLineNumbers;
+	private static final String PAREN_PATTERN = "\\(|\\)";
+	private static final String BRACE_PATTERN = "\\{|\\}";
+	private static final String BRACKET_PATTERN = "\\[|\\]";
+	private static final String SEMICOLON_PATTERN = "\\;";
+	private static final String STRING_PATTERN = "\"([^\"\\\\]|\\\\.)*\"";
+	private static final String COMMENT_PATTERN = "//[^\n]*" + "|" + "/\\*(.|\\R)*?\\*/";
 
-	private ScrollBar sbSource;
-	private ScrollBar sbLineNum;
-	private boolean scrollLinked = false;
+	private static final String[] KEYWORDS = new String[] {
+			"abstract", "assert", "boolean", "break", "byte",
+			"case", "catch", "char", "class", "const",
+			"continue", "default", "do", "double", "else",
+			"enum", "extends", "final", "finally", "float",
+			"for", "goto", "if", "implements", "import",
+			"instanceof", "int", "interface", "long", "native",
+			"new", "package", "private", "protected", "public",
+			"return", "short", "static", "strictfp", "super",
+			"switch", "synchronized", "this", "throw", "throws",
+			"transient", "try", "void", "volatile", "while"
+	};
 
-	private ISandboxStage sandboxStage;
+
+	private final Pattern highlightPattern;
+	private final CodeArea codeArea;
+	private final ISandboxStage sandboxStage;
 
 	private boolean isModified = false;
 
@@ -55,81 +62,94 @@ public class EditorPane extends VBox
 	{
 		this.sandboxStage = stage;
 
-		taSource = new TextArea();
-
-		String styleSource = "-fx-font-family:" + FONT_MONOSPACE_FAMILY + "; -fx-font-size:" + FONT_MONOSPACE_SIZE
-				+ "px; -fx-background-color:white;";
-
-		taSource.setStyle(styleSource);
-
-		taSource.textProperty().addListener(new ChangeListener<String>()
+		StringBuilder keywords = new StringBuilder();
+		for(String keyword : KEYWORDS)
 		{
-			@Override
-			public void changed(final ObservableValue<? extends String> observable, final String oldValue, final String newValue)
-			{
-				setModified(true);
-			}
-		});
+			keywords.append(keyword).append("|");
+		}
 
-		setTextAreaSaveCombo(taSource);
+		String keywordPattern = "\\b(" + keywords.substring(0,keywords.length()-1) + ")\\b";
 
-		String styleLineNumber = "-fx-padding:0; -fx-font-family:" + FONT_MONOSPACE_FAMILY + "; -fx-font-size:"
-				+ FONT_MONOSPACE_SIZE + "px; -fx-background-color:#eeeeee;";
+		Pattern pattern = Pattern.compile(""
+						+ "(?<KEYWORD>" + keywordPattern + ")"
+						+ "|(?<PAREN>" + PAREN_PATTERN + ")"
+						+ "|(?<BRACE>" + BRACE_PATTERN + ")"
+						+ "|(?<BRACKET>" + BRACKET_PATTERN + ")"
+						+ "|(?<SEMICOLON>" + SEMICOLON_PATTERN + ")"
+						+ "|(?<STRING>" + STRING_PATTERN + ")"
+						+ "|(?<COMMENT>" + COMMENT_PATTERN + ")"
+		);
 
-		taLineNumbers = new TextArea();
-		taLineNumbers.setStyle(styleLineNumber);
-		taLineNumbers.setEditable(false);
-		taLineNumbers.setWrapText(true);
+		this.highlightPattern = pattern;
 
-		spTextAreas = new SplitPane();
-		spTextAreas.setOrientation(Orientation.HORIZONTAL);
-		spTextAreas.getItems().add(taLineNumbers);
-		spTextAreas.getItems().add(taSource);
-		spTextAreas.setStyle("-fx-background-color: white");
+		this.codeArea = createCodeArea();
 
-		taSource.prefWidthProperty().bind(spTextAreas.widthProperty());
+		getChildren().add(codeArea);
 
-		getChildren().add(spTextAreas);
-
-		spTextAreas.prefHeightProperty().bind(heightProperty());
-
-		generateLineNumbers(1);
 	}
 
-	private void setTextAreaSaveCombo(TextArea textArea)
+	private CodeArea createCodeArea()
 	{
-		textArea.addEventFilter(KeyEvent.KEY_PRESSED, new EventHandler<KeyEvent>()
-		{
-			final KeyCombination combo = new KeyCodeCombination(KeyCode.S, KeyCombination.SHORTCUT_DOWN);
+		CodeArea codeArea = new CodeArea();
 
+		codeArea.setParagraphGraphicFactory(LineNumberFactory.get(codeArea));
+
+		codeArea.textProperty().addListener(new ChangeListener<String>() {
 			@Override
-			public void handle(KeyEvent event)
-			{
-				// check for only tab key
-				if (combo.match(event))
-				{
-					saveFile();
-					event.consume();
-				}
+			public void changed(ObservableValue<? extends String> obs, String oldText, String newText) {
+				codeArea.setStyleSpans(0, computeHighlighting(newText));
 			}
 		});
+
+		codeArea.getStylesheets().add(getClass().getClassLoader().getResource("java-syntax-color.css").toExternalForm());
+		codeArea.prefHeightProperty().bind(heightProperty());
+
+		return codeArea;
+	}
+
+	private StyleSpans<Collection<String>> computeHighlighting(String text) {
+
+		Matcher matcher = this.highlightPattern.matcher(text);
+
+		int lastKwEnd = 0;
+		StyleSpansBuilder<Collection<String>> spansBuilder = new StyleSpansBuilder<>();
+
+		while (matcher.find()) {
+
+			String styleClass = null;
+
+			if (matcher.group("KEYWORD") != null) {
+				styleClass = "keyword";
+			} else if (matcher.group("PAREN") != null) {
+				styleClass = "paren";
+			} else if (matcher.group("BRACE") != null) {
+				styleClass = "brace";
+			} else if (matcher.group("BRACKET") != null) {
+				styleClass = "bracket";
+			} else if (matcher.group("SEMICOLON") != null) {
+				styleClass = "semicolon";
+			} else if (matcher.group("STRING") != null) {
+				styleClass = "string";
+			} else if (matcher.group("COMMENT") != null) {
+				styleClass = "comment";
+			} else {
+				styleClass = null;
+			}
+
+			assert styleClass != null;
+
+			spansBuilder.add(Collections.<String>emptyList(), matcher.start() - lastKwEnd);
+			spansBuilder.add(Collections.singleton(styleClass), matcher.end() - matcher.start());
+			lastKwEnd = matcher.end();
+		}
+
+		spansBuilder.add(Collections.<String>emptyList(), text.length() - lastKwEnd);
+		return spansBuilder.create();
 	}
 
 	private void setModified(final boolean modified)
 	{
 		this.isModified = modified;
-
-		Platform.runLater(new Runnable()
-		{
-			@Override
-			public void run()
-			{
-				int breakCount = 1 + countChar(taSource.getText(), C_NEWLINE);
-
-				generateLineNumbers(breakCount);
-			}
-		});
-
 		sandboxStage.setModified(this, isModified);
 	}
 
@@ -138,82 +158,9 @@ public class EditorPane extends VBox
 		return isModified;
 	}
 
-	private void generateLineNumbers(int breakCount)
-	{
-		StringBuilder builder = new StringBuilder();
-
-		final int maxDigits = Integer.toString(breakCount).length();
-
-		for (int i = 0; i < breakCount; i++)
-		{
-			String marker = StringUtil.padLineNumber(i + 1, maxDigits);
-
-			builder.append(marker).append(C_NEWLINE);
-		}
-
-		double minWidth = 16 + maxDigits * 12;
-
-		taLineNumbers.setText(builder.toString());
-		taLineNumbers.setMinWidth(minWidth);
-		taLineNumbers.setMaxWidth(minWidth + 16);
-		taLineNumbers.setPrefWidth(minWidth);
-
-		if (sbSource == null)
-		{
-			sbSource = (ScrollBar) taSource.lookup(".scroll-bar:vertical");
-		}
-
-		if (sbLineNum == null)
-		{
-			sbLineNum = (ScrollBar) taLineNumbers.lookup(".scroll-bar:vertical");
-		}
-
-		if (sbLineNum != null)
-		{
-			sbLineNum.setOpacity(0.0);
-			sbLineNum.setStyle("-fx-background-color:white");
-		}
-
-		if (sbSource != null && sbLineNum != null && !scrollLinked)
-		{
-			linkScrollBars();
-		}
-	}
-
-	private void linkScrollBars()
-	{
-		sbSource.valueProperty().addListener(new ChangeListener<Number>()
-		{
-			@Override
-			public void changed(ObservableValue<? extends Number> value, Number oldValue, Number newValue)
-			{
-				sbLineNum.setValue(newValue.doubleValue());
-			}
-		});
-
-		scrollLinked = true;
-	}
-
-	private int countChar(String text, char countChar)
-	{
-		int result = 0;
-
-		for (int i = 0; i < text.length(); i++)
-		{
-			char c = text.charAt(i);
-
-			if (c == countChar)
-			{
-				result++;
-			}
-		}
-
-		return result;
-	}
-
 	public String getSource()
 	{
-		return taSource.getText().trim();
+		return codeArea.getText().trim();
 	}
 
 	public File getSourceFile()
@@ -252,7 +199,7 @@ public class EditorPane extends VBox
 			{
 				source = source.replace("\t", "    ");
 
-				taSource.setText(source.trim());
+				codeArea.replaceText(0, 0, source.trim());
 
 				setModified(false);
 			}
